@@ -1,0 +1,136 @@
+import os
+import numpy as np
+import pyodbc  # For SQL Server connection
+from sentence_transformers import SentenceTransformer
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
+from langchain.sql_database import SQLDatabase
+from langchain.embeddings import OpenAIEmbeddings
+
+# Initialize Sentence Transformer Model
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Set up Vertex AI
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "email-extraction-381718-3f73208ce3b71.json"
+vertexai.init(project="fleetenable", location="us-central1")
+generative_multimodal_model = GenerativeModel("gemini-1.5-pro-001")
+
+# SQL Server Connection - Using tempDB
+conn_str = "DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost;DATABASE=tempdb;Trusted_Connection=yes;"
+conn = pyodbc.connect(conn_str)
+cursor = conn.cursor()
+
+# Create Table for Storing Embeddings
+def create_table():
+    cursor.execute("""
+    IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='vector_store' AND xtype='U')
+    CREATE TABLE vector_store (
+        id INT IDENTITY PRIMARY KEY,
+        text NVARCHAR(MAX),
+        embedding VARBINARY(MAX)
+    );
+    """)
+    conn.commit()
+
+# Load and preprocess the txt file
+def load_data(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        raw_text = f.readlines()
+
+    # Convert to structured format if needed
+    data = [line.strip() for line in raw_text if line.strip()]
+    return data
+
+# Generate embeddings and store them in SQL Server
+def store_embeddings(text_list):
+    cursor.execute("DELETE FROM vector_store")  # Clear previous entries
+    conn.commit()
+
+    for text in text_list:
+        embedding = embedding_model.encode([text], convert_to_numpy=True)[0]
+        embedding_bytes = embedding.tobytes()
+        cursor.execute("INSERT INTO vector_store (text, embedding) VALUES (?, ?)", (text, embedding_bytes))
+    
+    conn.commit()
+
+# Perform vector search using SQL (Cosine Similarity)
+def search_similar_texts(query, k=3):
+    query_embedding = embedding_model.encode([query], convert_to_numpy=True)[0]
+    query_embedding_bytes = query_embedding.tobytes()
+
+    cursor.execute("SELECT text, embedding FROM vector_store")
+    results = cursor.fetchall()
+
+    similarities = []
+    for row in results:
+        text, embedding_bytes = row
+        embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
+        similarity = np.dot(query_embedding, embedding) / (np.linalg.norm(query_embedding) * np.linalg.norm(embedding))
+        similarities.append((text, similarity))
+    
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    relevant_texts = [sim[0] for sim in similarities[:k]]
+
+    return relevant_texts
+
+# Query Gemini AI with retrieved context
+def query_gemini(context, user_query):
+    prompt = f"""
+    You are an advanced AI system designed to extract relevant insights from structured and unstructured data.
+    Use the retrieved information below to accurately answer the user's query.
+
+    Retrieved Information:
+    {context}
+
+    User Query:
+    {user_query}
+
+    Instructions:
+    Your response should be based only on the retrieved information and avoid adding any assumptions.
+    If the retrieved information does not explicitly contain an answer, state that the requested information is not found.
+    Provide concise, direct, and structured answers.
+
+    Answer:
+    """
+    generation_config = {
+        "max_output_tokens": 8192,
+        "temperature": 0.2,
+        "top_p": 0.3,
+    }
+
+    safety_settings = {
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    }
+
+    response = generative_multimodal_model.generate_content(prompt, generation_config=generation_config,
+                                                            safety_settings=safety_settings)
+
+    return response.text
+
+# Main Execution
+if __name__ == "__main__":
+    create_table()
+
+    while True:
+        file_path = "Data/output.csv"
+        text_data = load_data(file_path)
+
+        # Generate and store embeddings
+        store_embeddings(text_data)
+
+        # Take user input and perform retrieval
+        user_query = input("\nEnter your query (or type 'exit' to quit): ")
+        if user_query.lower() == "exit":
+            print("Exiting...")
+            break
+
+        relevant_texts = search_similar_texts(user_query)
+
+        context = "\n".join(relevant_texts)
+
+        # Query Gemini AI and display the result
+        response = query_gemini(context, user_query)
+        print("\nGemini Response:\n", response)
