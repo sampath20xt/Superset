@@ -1,0 +1,47 @@
+import pandas as pd
+import json
+
+def json_txt_to_dataframe(file_path):
+    """
+    Reads a JSON file (either as a list or within a dictionary) and converts it into a Pandas DataFrame.
+    - Supports both raw lists and {"data": [...] } formats.
+    - Handles encoding and JSON parsing errors gracefully.
+
+    Args:
+    file_path (str): Path to the .txt file.
+
+    Returns:
+    pd.DataFrame: A structured DataFrame containing the extracted data.
+    """
+    try:
+        # Read the JSON file
+        with open(file_path, "r", encoding="utf-8") as file:
+            data = json.load(file)  # Load JSON
+
+        # Handle different JSON structures
+        if isinstance(data, list):
+            df = pd.DataFrame(data)  # JSON is already a list
+        elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+            df = pd.DataFrame(data["data"])  # Extract list from "data" key
+        else:
+            raise ValueError("Invalid JSON format: Expected a list or a dictionary with a 'data' key.")
+
+        return df
+
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing JSON: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        return pd.DataFrame()
+
+# Example Usage
+file_path = "C:/Users/SuvarnaSampath/PycharmProjects/Superset/Base/inventory_age.txt"
+df = json_txt_to_dataframe(file_path)
+
+# Save as CSV for verification
+df.to_csv("C:/Users/SuvarnaSampath/PycharmProjects/Superset/Data/inventory.csv", index=False)
+
+# Display DataFrame
+import ace_tools as tools
+tools.display_dataframe_to_user(name="Extracted Data", dataframe=df)
