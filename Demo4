@@ -1,0 +1,125 @@
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import os
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
+
+# Load the sentence-transformers model
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "email-extraction-381718-3b73208ce3b71.json"
+vertexai.init(project="fleetenable", location="us-central1")
+generative_multimodal_model = GenerativeModel("gemini-1.5-pro-001")
+
+# Load and preprocess the txt file
+def load_data(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        raw_text = f.readlines()
+
+    # Convert to structured format if needed
+    data = [line.strip() for line in raw_text if line.strip()]
+    return data
+
+# Generate embeddings for each text chunk
+def generate_embeddings(text_list):
+    embeddings = embedding_model.encode(text_list, convert_to_numpy=True)
+    
+    # Normalize embeddings for better similarity ranking
+    faiss.normalize_L2(embeddings)  
+    
+    return embeddings
+
+# Create FAISS index with Inner Product (Cosine Similarity)
+def create_faiss_index(embeddings):
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatIP(dim)  # Use Inner Product for better retrieval
+    index.add(embeddings)
+    return index
+
+# Perform vector search using FAISS with validity checks
+def search_similar_texts(query, text_list, index, k=20):
+    query_embedding = embedding_model.encode([query], convert_to_numpy=True)
+    
+    # Normalize query embedding before search
+    faiss.normalize_L2(query_embedding)  
+
+    distances, indices = index.search(query_embedding, k)
+
+    results = []
+    print("\n[DEBUG] Retrieved Texts and Distances:")
+
+    for idx, i in enumerate(indices[0]):
+        if 0 <= i < len(text_list):  # Ensure the index is valid
+            print(f" - [{distances[0][idx]:.4f}] {text_list[i]}")
+            results.append(text_list[i])
+        else:
+            print(f" - [Skipping invalid index {i}]")
+
+    return results
+
+# Query Gemini AI with retrieved context
+def query_gemini(context, user_query):
+    prompt = f"""
+    You are an AI system that extracts accurate information from the provided data.
+    
+    ### **Retrieved Information:**
+    {context}
+    
+    ### **User Query:**
+    {user_query}
+
+    ### **Instructions:**
+    - Base your answer **only on the retrieved information**.
+    - If the answer is numerical, count occurrences from the given text.
+    - If multiple data points are relevant, **list them all clearly**.
+    - If no answer is found, respond with **"The information is not available in the provided data."**
+    
+    ### **Final Answer:**
+    """
+
+    generation_config = {
+        "max_output_tokens": 8192,
+        "temperature": 0.5,
+        "top_p": 0.8,
+    }
+
+    safety_settings = {
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    }
+
+    # Generate content from Gemini
+    response = generative_multimodal_model.generate_content(prompt, generation_config=generation_config,
+                                                            safety_settings=safety_settings)
+
+    return response.text
+
+# Main execution
+if __name__ == "__main__":
+    while True:
+        file_path = "Data/output.csv"
+        text_data = load_data(file_path)
+
+        # Generate embeddings for new data
+        embeddings = generate_embeddings(text_data)
+
+        # Create a temporary FAISS index (previous embeddings are lost)
+        index = create_faiss_index(embeddings)
+
+        # Take user input and perform retrieval
+        user_query = input("\nEnter your query (or type 'exit' to quit): ")
+        if user_query.lower() == "exit":
+            print("Exiting...")
+            break
+
+        relevant_texts = search_similar_texts(user_query, text_data, index)
+
+        # Select top 20 most relevant results as context
+        context = "\n".join(relevant_texts)
+
+        # Query Gemini AI and display the result
+        response = query_gemini(context, user_query)
+        print("\nGemini Response:\n", response)
