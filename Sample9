@@ -1,0 +1,49 @@
+import os
+from litellm import completion
+from crewai_tools import CSVSearchTool
+from crewai import Agent, Task, Crew
+
+# Set Groq API Key (Make sure to add your key)
+os.environ['GROQ_API_KEY'] = "your_groq_api_key_here"
+
+# Define Groq-based function for LLM interaction
+def groq_llm(messages):
+    response = completion(
+        model="groq/llama3-8b-8192",  # Using LLaMA 3 from Groq
+        messages=messages
+    )
+    return response['choices'][0]['message']['content']
+
+# Define CSV Search Tool (No VertexAI dependency)
+tool = CSVSearchTool(csv='Data/inventory.csv')
+
+# Prompt user for input
+user_prompt = input("Please enter your inventory analysis request: ")
+
+# Define CrewAI Task using Groq LLM
+task = Task(
+    description=user_prompt,
+    tools=[tool],
+    expected_output="Generated insights based on the user's query."
+)
+
+# Define CrewAI Agent using Groq API
+agent = Agent(
+    role="Data Analyst",
+    goal="Provide meaningful insights based on the inventory dataset.",
+    backstory="You are an AI-powered data analyst specialized in inventory management.",
+    verbose=True,
+    llm=groq_llm,  # Using the function that calls Groq API
+    allow_delegation=False
+)
+
+# Create Crew with Agent & Task
+crew = Crew(
+    agents=[agent],
+    tasks=[task],
+    verbose=True
+)
+
+# Run the Crew
+result = crew.kickoff()
+print(result)
