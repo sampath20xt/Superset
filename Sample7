@@ -1,0 +1,62 @@
+import os
+from crewai_tools import CSVSearchTool
+from langchain_google_vertexai import VertexAI
+from crewai import Agent, Task, Crew
+
+# Set Google Cloud Credentials
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "path/to/your/credentials.json"
+os.environ["VERTEX_PROJECT"] = "your-project-id"
+os.environ["VERTEX_LOCATION"] = "your-location"
+
+# Initialize Vertex AI LLM
+llm = VertexAI(model_name="your-model-name", temperature=0.4)
+
+# Define CSV Search Tool with Vertex AI configuration
+tool = CSVSearchTool(
+    csv='Data/inventory.csv',
+    config=dict(
+        llm=dict(
+            provider="vertexai",
+            config=dict(
+                model=llm,
+            ),
+        ),
+        embedder=dict(
+            provider="vertexai",
+            config=dict(
+                model=llm,
+            ),
+        ),
+    )
+)
+
+# Prompt user for input
+user_prompt = input("Please enter your inventory analysis request: ")
+
+# Define CrewAI Task using Vertex AI
+task = Task(
+    description=user_prompt,
+    tools=[tool],
+    expected_output="Generated insights based on the user's query."
+)
+
+# Define CrewAI Agent using Vertex AI
+agent = Agent(
+    role="Data Analyst",
+    goal="Provide meaningful insights based on the inventory dataset.",
+    backstory="You are an AI-powered data analyst specialized in inventory management.",
+    verbose=True,
+    llm=llm,
+    allow_delegation=False
+)
+
+# Create Crew with Agent & Task
+crew = Crew(
+    agents=[agent],
+    tasks=[task],
+    verbose=True
+)
+
+# Run the Crew
+result = crew.kickoff()
+print(result)
