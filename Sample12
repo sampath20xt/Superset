@@ -1,0 +1,54 @@
+from crewai_tools import CSVSearchTool
+import os
+
+class CSVSearchRAG:
+    """
+    A Retrieval-Augmented Generation (RAG) search tool for CSV files using CrewAI.
+    """
+
+    def __init__(self, csv_file: str):
+        """
+        Initializes the CSVSearchRAG with the CSV file and sets up the search tool.
+        
+        :param csv_file: Path to the CSV file to be searched.
+        """
+        self.csv_search = CSVSearchTool(
+            csv=csv_file,
+            config=dict(
+                llm=dict(
+                    provider="groq",
+                    config=dict(
+                        model="llama3-8b-8192",
+                        api_key=os.getenv("GROQ_API_KEY"),
+                        prompt="You are an AI assistant. Search the CSV file and return only the most relevant results.",
+                    ),
+                ),
+                embedder=dict(
+                    provider="huggingface",
+                    config=dict(
+                        model="BAAI/bge-small-en-v1.5",
+                    ),
+                ),
+            ),
+        )
+
+    def search(self, query: str):
+        """
+        Searches the CSV file using a semantic query.
+
+        :param query: The search query provided by the user.
+        :return: Search results.
+        """
+        result = self.csv_search._run(query)
+        return result
+
+# === Execution ===
+if __name__ == "__main__":
+    csv_file_path = "SaleData.csv"  # Change this to your actual CSV file path
+    csv_rag = CSVSearchRAG(csv_file_path)
+
+    query = input("Enter your search query: ")
+    results = csv_rag.search(query)
+
+    print("\n🔍 Search Results:")
+    print(results)
