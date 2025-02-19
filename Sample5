@@ -1,0 +1,156 @@
+import os
+import chromadb
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
+
+# Initialize Sentence Transformer Model
+embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+# Initialize Vertex AI
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "email-extraction-381718-3f73208ce3b71.json"
+vertexai.init(project="fleetenable", location="us-central1")
+generative_multimodal_model = GenerativeModel("gemini-1.5-pro-001")
+
+print("Initializing ChromaDB EphemeralClient...")
+chroma_client = chromadb.EphemeralClient()
+vector_collection = chroma_client.get_or_create_collection("temp_vectors")
+print("ChromaDB Initialized.")
+
+
+# Load and preprocess the text file
+def load_data(file_path):
+    print(f"Loading data from {file_path}...")
+    with open(file_path, "r", encoding="utf-8") as f:
+        raw_text = f.readlines()
+
+    data = [line.strip() for line in raw_text if line.strip()]
+    print(f"Loaded {len(data)} lines of text.")
+    return data
+
+
+# Generate embeddings and store them in ChromaDB
+def store_embeddings(text_list):
+    global vector_collection
+    print("Clearing existing vector database...")
+
+    # Delete and recreate collection
+    chroma_client.delete_collection("temp_vectors")
+    vector_collection = chroma_client.get_or_create_collection("temp_vectors")
+
+    print("Generating and storing embeddings...")
+    for idx, text in enumerate(text_list):
+        embedding = embedding_model.encode([text], convert_to_numpy=True)[0].tolist()
+        vector_collection.add(
+            ids=[str(idx)],
+            embeddings=[embedding],
+            metadatas=[{"text": text}]
+        )
+    print(f"Stored {len(text_list)} embeddings.")
+
+
+# Improved vector search with better recall
+def search_similar_texts(query, k=100, min_similarity_threshold=0.5, max_similarity_threshold=1.1):
+    print(f"Performing vector search for query: {query}")
+    
+    query_embedding = embedding_model.encode([query], convert_to_numpy=True)[0].tolist()
+
+    # Initial retrieval with a higher similarity threshold
+    results = vector_collection.query(
+        query_embeddings=[query_embedding],
+        n_results=k
+    )
+
+    retrieved_texts = []
+    scores = results["distances"][0]
+
+    # Dynamically filter results based on similarity scores
+    for i, score in enumerate(scores):
+        if min_similarity_threshold <= score <= max_similarity_threshold:
+            retrieved_texts.append(results["metadatas"][0][i]["text"])
+
+    # If very few results are found, dynamically lower the similarity threshold
+    if len(retrieved_texts) < 10:
+        print(f"Low retrieval count ({len(retrieved_texts)}), expanding search...")
+        for i, score in enumerate(scores):
+            if score >= min_similarity_threshold - 0.1:  # Expanding search space
+                retrieved_texts.append(results["metadatas"][0][i]["text"])
+
+    # Debugging: Print retrieved texts with scores
+    print("\nRetrieved texts with similarity scores:")
+    for text, score in zip(retrieved_texts, scores):
+        print(f"Score: {score:.4f} | Text: {text}")
+
+    if not retrieved_texts:
+        print("No sufficiently similar results found.")
+        return ["No relevant information found."]
+
+    return retrieved_texts
+
+
+# Query Gemini AI with retrieved context
+def query_gemini(context, user_query):
+    print("Querying Gemini AI...")
+    prompt = f"""
+    You are an advanced AI system designed to extract relevant insights from structured and unstructured data.
+    Use the retrieved information below to accurately answer the user's query.
+
+    Retrieved Information:
+    {context}
+
+    User Query:
+    {user_query}
+
+    Instructions:
+    Your response should be based only on the retrieved information and avoid adding any assumptions.
+    If the retrieved information does not explicitly contain an answer, state that the requested information is not found.
+    Provide concise, direct, and structured answers.
+
+    Answer:
+    """
+
+    generation_config = {
+        "max_output_tokens": 8192,
+        "temperature": 0.2,
+        "top_p": 0.3,
+    }
+
+    safety_settings = {
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    }
+
+    response = generative_multimodal_model.generate_content(prompt, generation_config=generation_config,
+                                                            safety_settings=safety_settings)
+
+    print("Gemini AI Response Generated.")
+    return response.text
+
+
+# Main Execution
+if __name__ == "__main__":
+    print("Starting the program...")
+
+    while True:
+        file_path = "Data/inventory.csv"
+        text_data = load_data(file_path)
+
+        # Generate and store embeddings in ChromaDB
+        store_embeddings(text_data)
+
+        # Take user input and perform retrieval
+        user_query = input("\nEnter your query (or type 'exit' to quit): ")
+        if user_query.lower() == "exit":
+            print("Exiting...")
+            break
+
+        relevant_texts = search_similar_texts(user_query)
+
+        context = "\n".join(relevant_texts)
+
+        # Query Gemini AI and display the result
+        response = query_gemini(context, user_query)
+        print("\nGemini Response:\n", response)
