@@ -1,0 +1,63 @@
+import os
+from litellm import completion
+from crewai_tools import CSVSearchTool
+from crewai import Agent, Task, Crew
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Ensure GROQ API key is set
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY is not set. Please add it to your .env file.")
+
+# Set a dummy OpenAI API key to prevent dependency issues
+os.environ["OPENAI_API_KEY"] = "dummy_key"
+
+# Define Groq-based function for LLM interaction
+def groq_llm(messages):
+    response = completion(
+        model="llama-3.1-8b-instant",  # Using LLaMA 3 from Groq
+        messages=messages
+    )
+    return response['choices'][0]['message']['content']
+
+# Ensure CSV file exists
+csv_path = "Data/inventory.csv"
+if not os.path.exists(csv_path):
+    raise FileNotFoundError(f"CSV file not found at {csv_path}. Please check the path.")
+
+# Define CSV Search Tool (removing the config argument)
+tool = CSVSearchTool(csv=csv_path)
+
+# Prompt user for input
+user_prompt = input("Please enter your inventory analysis request: ")
+
+# Define CrewAI Task using Groq LLM
+task = Task(
+    description=user_prompt,
+    tools=[tool],
+    expected_output="Generated insights based on the user's query."
+)
+
+# Define CrewAI Agent using Groq API
+agent = Agent(
+    role="Data Analyst",
+    goal="Provide meaningful insights based on the inventory dataset.",
+    backstory="You are an AI-powered data analyst specialized in inventory management.",
+    verbose=True,
+    llm=groq_llm,  # Using the function that calls Groq API
+    allow_delegation=False
+)
+
+# Create Crew with Agent & Task
+crew = Crew(
+    agents=[agent],
+    tasks=[task],
+    verbose=True
+)
+
+# Run the Crew
+result = crew.kickoff()
+print(result)
