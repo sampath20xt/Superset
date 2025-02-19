@@ -1,0 +1,79 @@
+Solution to Fix the Errors
+
+The errors stem from multiple issues, including:
+	1.	Pydantic V1 to V2 Migration Issues
+	2.	SQLite ChromaDB Migration Issue (duplicate column name: bool_value)
+
+Step 1: Fix Pydantic V1 to V2 Migration Warnings
+
+Your error messages indicate deprecated usage of @validator and config in Pydantic. To resolve this:
+
+Upgrade Pydantic & Ensure Dependencies Match
+
+Run:
+
+pip install --upgrade pydantic crewai-tools embedchain chromadb
+
+Then, check which Pydantic version is installed:
+
+pip show pydantic
+
+If it shows V1.x, force install V2:
+
+pip install --upgrade pydantic==2.6.4  # Latest Pydantic 2.x version
+
+Restart Your Environment
+	•	If you’re using PyCharm, restart your IDE.
+	•	If you’re using Jupyter Notebook, restart the kernel.
+
+Step 2: Fix ChromaDB duplicate column name: bool_value Issue
+
+This error occurs because ChromaDB is trying to reapply migrations when a database already exists.
+
+Fix: Delete the Existing ChromaDB Database
+
+ChromaDB uses an SQLite file stored in your working directory. You need to delete the existing DB file:
+	1.	Locate ChromaDB Storage Path
+The default storage location is chroma.sqlite3 inside your project.
+Run this in Python to confirm:
+
+import chromadb
+print(chromadb.PersistentClient.DEFAULT_PATH)
+
+This will print the database location (e.g., ./chroma.sqlite3).
+
+	2.	Delete the Existing Database
+Run the following in your terminal:
+
+rm -rf ./chroma.sqlite3 ./chroma_db
+
+If you’re on Windows, use:
+
+Remove-Item -Recurse -Force .\chroma.sqlite3
+Remove-Item -Recurse -Force .\chroma_db
+
+
+	3.	Restart ChromaDB
+Restart your script after deleting the database.
+
+Step 3: Verify Environment Variables
+
+Since you’re using os.getenv("GROQ_API_KEY"), ensure that the API key is correctly set:
+	1.	If using a .env file, add:
+
+GROQ_API_KEY=your_api_key_here
+
+
+	2.	Load it in your script:
+
+from dotenv import load_dotenv
+load_dotenv()
+
+Final Steps
+
+After following these fixes:
+	1.	Upgrade dependencies (pydantic, crewai-tools, embedchain, chromadb).
+	2.	Delete and recreate ChromaDB (rm -rf ./chroma.sqlite3 ./chroma_db).
+	3.	Restart your script.
+
+This should resolve all the errors! Let me know if you still face issues.
