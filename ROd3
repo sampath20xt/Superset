@@ -1,0 +1,171 @@
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.document_loaders import CSVLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_groq import ChatGroq
+from langchain_core.prompts import PromptTemplate
+from langchain_community.vectorstores import PGVector
+from langchain.schema import Document
+from dotenv import load_dotenv, find_dotenv
+import psycopg2
+import pandas as pd
+import os
+
+# Load environment variables
+load_dotenv(find_dotenv())
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+PG_HOST = os.getenv("PG_HOST")
+PG_USER = os.getenv("PG_USER")
+PG_PASSWORD = os.getenv("PG_PASSWORD")
+PG_DATABASE = os.getenv("PG_DATABASE")
+PG_TABLE = "rag_csv_data"
+
+# Initialize LLM model
+llm_model = ChatGroq(model="llama-3.3-70b-versatile")
+
+# Initialize embedding model
+embedding_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+
+
+# Function to create PostgreSQL table if not exists
+def create_pg_table():
+    conn = psycopg2.connect(
+        host=PG_HOST, user=PG_USER, password=PG_PASSWORD, dbname=PG_DATABASE
+    )
+    cursor = conn.cursor()
+    
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS {PG_TABLE} (
+        id SERIAL PRIMARY KEY,
+        content TEXT,
+        embedding VECTOR(768)
+    );
+    """)
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print("PostgreSQL Table Created/Verified")
+
+
+# Function to process CSV and store data in PostgreSQL with embeddings
+def process_csv_and_store_embeddings(csv_path):
+    df = pd.read_csv(csv_path)  # Load CSV into DataFrame
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+
+    # Connect to PostgreSQL
+    conn = psycopg2.connect(
+        host=PG_HOST, user=PG_USER, password=PG_PASSWORD, dbname=PG_DATABASE
+    )
+    cursor = conn.cursor()
+
+    for index, row in df.iterrows():
+        row_text = " ".join([str(value) for value in row.values])  # Combine row values as text
+        chunks = text_splitter.split_text(row_text)  # Split row into smaller chunks
+
+        for chunk in chunks:
+            embedding = embedding_model.embed_query(chunk)  # Generate embeddings
+            cursor.execute(
+                f"INSERT INTO {PG_TABLE} (content, embedding) VALUES (%s, %s);",
+                (chunk, embedding)
+            )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print("CSV Data Processed and Stored in PostgreSQL")
+
+
+# Setup PostgreSQL Vector Search (pgvector)
+def setup_pgvector():
+    db = PGVector(
+        database=PG_DATABASE,
+        host=PG_HOST,
+        user=PG_USER,
+        password=PG_PASSWORD,
+        table_name=PG_TABLE,
+        embedding_function=embedding_model
+    )
+    return db.as_retriever(search_kwargs={'k': 5})
+
+
+# Define prompt
+CUSTOM_PROMPT_TEMPLATE = """
+You are a trained data retrieval agent specializing in retrieving information step by step.
+Your responses must be only from the given data. If the answer is not in the data, say, 
+"The answer is not available in the data" without adding extra details.
+
+Context: {context}
+Question: {question}
+"""
+
+prompt_template = PromptTemplate(template=CUSTOM_PROMPT_TEMPLATE, input_variables=["context", "question"])
+
+
+### **LangGraph Implementation** ###
+
+# Define Graph State
+class RetrievalState:
+    query: str
+    context: str = None
+    response: str = None
+
+# Graph Storage
+store = SqliteSaver("retrieval_state.db")
+
+# Create Graph
+graph = StateGraph(RetrievalState)
+retriever = setup_pgvector()
+
+
+# Step 1: Retrieve Relevant Documents
+def retrieve_documents(state):
+    query = state.query
+    docs = retriever.invoke(query)
+    context = "\n".join([doc.page_content for doc in docs]) if docs else None
+    return RetrievalState(query=query, context=context)
+
+
+# Step 2: Generate Response Using LLM
+def generate_response(state):
+    if state.context:
+        response = llm_model.invoke(prompt_template.format(context=state.context, question=state.query))
+    else:
+        response = "The answer is not available in the data."
+
+    return RetrievalState(query=state.query, context=state.context, response=response)
+
+
+# Step 3: Display Response
+def display_response(state):
+    print("\nRESULT:", state.response)
+    return state
+
+
+# Add Nodes to Graph
+graph.add_node("retrieve_docs", retrieve_documents)
+graph.add_node("generate_response", generate_response)
+graph.add_node("display_response", display_response)
+
+# Define Execution Flow
+graph.set_entry_point("retrieve_docs")
+graph.add_edge("retrieve_docs", "generate_response")
+graph.add_edge("generate_response", "display_response")
+
+# Compile Graph
+retrieval_graph = graph.compile(checkpointer=store)
+
+# Initialize database and store CSV data
+create_pg_table()
+csv_file_path = "data/inventory.csv"  # Replace with actual CSV file path
+process_csv_and_store_embeddings(csv_file_path)
+
+# Run Query Loop
+while True:
+    user_query = input("Write Query Here: ")
+    if user_query.lower() in ["exit", "quit"]:
+        break
+
+    retrieval_graph.invoke({"query": user_query})
