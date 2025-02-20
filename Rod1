@@ -1,0 +1,57 @@
+from crewai import Agent, Task, Crew
+from crewai_tools import CSVSearchTool
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Initialize CSV Search Tool with an optimized configuration
+csv_search_tool = CSVSearchTool(
+    csv="Data/inventory.csv",
+    config=dict(
+        llm=dict(
+            provider="groq",
+            config=dict(
+                model="llama3-8b-8192",
+                api_key=os.getenv("GROQ_API_KEY"),
+            ),
+        ),
+        embedder=dict(
+            provider="huggingface",
+            config=dict(
+                model="BAAI/bge-small-en-v1.5",
+                document_type="retrieval_document",  # Ensures better retrieval results
+            ),
+        ),
+        search_params=dict(
+            max_results=10,  # Increase the number of results
+            similarity_threshold=0.5,  # Adjust threshold for broader results
+        ),
+    ),
+)
+
+# Define an Agent that interacts with the tool
+data_analyst = Agent(
+    role='Inventory Analyst',
+    goal='Extract relevant product details from warehouse inventory.',
+    tools=[csv_search_tool],
+    allow_code_execution=True,
+    verbose=True,  # Enables more detailed logs
+)
+
+# Create a Task for the Agent
+search_task = Task(
+    description="Find all product names available in warehouse 'corona'.",
+    agent=data_analyst
+)
+
+# Assemble the Crew
+crew = Crew(
+    agents=[data_analyst],
+    tasks=[search_task]
+)
+
+# Execute the Task
+result = crew.kickoff()
+
+print("Search Results:", result)
