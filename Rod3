@@ -1,0 +1,30 @@
+from crewai_tools import CSVSearchTool
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Initialize CSV Search Tool without `search_params`
+csv_search_tool = CSVSearchTool(
+    csv="Data/inventory.csv",
+    config=dict(
+        llm=dict(
+            provider="groq",
+            config=dict(
+                model="llama3-8b-8192",
+                api_key=os.getenv("GROQ_API_KEY"),
+            ),
+        ),
+        embedder=dict(
+            provider="huggingface",
+            config=dict(
+                model="BAAI/bge-small-en-v1.5",  # Removed 'document_type'
+            ),
+        ),
+    ),
+)
+
+# Running the search with max_results passed as an argument
+result = csv_search_tool._run("what is the product name for warehouse corona", max_results=10)
+
+print("Search Results:", result)
