@@ -1,0 +1,151 @@
+from langchain_postgres import PGVector
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langchain_groq import ChatGroq
+from langchain_core.prompts import PromptTemplate
+from dotenv import load_dotenv, find_dotenv
+import psycopg2
+import pandas as pd
+import os
+
+# Load environment variables
+load_dotenv(find_dotenv())
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+PG_HOST = os.getenv("PG_HOST")
+PG_USER = os.getenv("PG_USER")
+PG_PASSWORD = os.getenv("PG_PASSWORD")
+PG_DATABASE = os.getenv("PG_DATABASE")
+PG_TABLE = "rag_csv_data"
+
+# Initialize LLM and Embeddings
+llm_model = ChatGroq(model="llama-3.3-70b-versatile")
+embedding_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+
+# Create PostgreSQL Table
+def create_pg_table():
+    conn = psycopg2.connect(
+        host=PG_HOST, user=PG_USER, password=PG_PASSWORD, dbname=PG_DATABASE
+    )
+    cursor = conn.cursor()
+    
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS {PG_TABLE} (
+        id SERIAL PRIMARY KEY,
+        content TEXT,
+        embedding VECTOR(768)
+    );
+    """)
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print("PostgreSQL Table Created/Verified")
+
+
+# Process CSV and Store Data in PostgreSQL
+def process_csv_and_store_embeddings(csv_path):
+    df = pd.read_csv(csv_path)
+    conn = psycopg2.connect(
+        host=PG_HOST, user=PG_USER, password=PG_PASSWORD, dbname=PG_DATABASE
+    )
+    cursor = conn.cursor()
+
+    for _, row in df.iterrows():
+        row_text = " ".join([str(value) for value in row.values])
+        embedding = embedding_model.embed_query(row_text)  # Generate embeddings
+        cursor.execute(
+            f"INSERT INTO {PG_TABLE} (content, embedding) VALUES (%s, %s);",
+            (row_text, embedding)
+        )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print("CSV Data Processed and Stored in PostgreSQL")
+
+
+# Setup PGVector with the New Syntax
+def setup_pgvector():
+    connection_uri = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}/{PG_DATABASE}"
+    
+    db = PGVector(
+        connection_uri=connection_uri,
+        collection_name=PG_TABLE,
+        embedding_function=embedding_model,
+    )
+    return db.as_retriever(search_kwargs={'k': 5})
+
+
+# Retrieve Relevant Documents from PostgreSQL
+def retrieve_documents(state):
+    query = state.query
+    query_embedding = embedding_model.embed_query(query)  # Generate embedding
+
+    conn = psycopg2.connect(
+        host=PG_HOST, user=PG_USER, password=PG_PASSWORD, dbname=PG_DATABASE
+    )
+    cursor = conn.cursor()
+
+    cursor.execute(f"""
+        SELECT content
+        FROM {PG_TABLE}
+        ORDER BY embedding <=> %s
+        LIMIT 5;
+    """, (query_embedding,))
+
+    retrieved_docs = cursor.fetchall()
+    conn.close()
+
+    context = "\n".join([doc[0] for doc in retrieved_docs]) if retrieved_docs else None
+    return {"query": query, "context": context}
+
+
+# Generate Response Using LLM
+def generate_response(state):
+    if state["context"]:
+        response = llm_model.invoke(
+            f"Answer the following question based on the provided context.\n\nContext: {state['context']}\n\nQuestion: {state['query']}"
+        )
+    else:
+        response = "The answer is not available in the database."
+
+    return {"query": state["query"], "context": state["context"], "response": response}
+
+
+# Display Response
+def display_response(state):
+    print("\nRESULT:", state["response"])
+    return state
+
+
+# Define LangGraph Workflow
+store = SqliteSaver("retrieval_state.db")
+graph = StateGraph()
+
+graph.add_node("retrieve_docs", retrieve_documents)
+graph.add_node("generate_response", generate_response)
+graph.add_node("display_response", display_response)
+
+graph.set_entry_point("retrieve_docs")
+graph.add_edge("retrieve_docs", "generate_response")
+graph.add_edge("generate_response", "display_response")
+
+retrieval_graph = graph.compile(checkpointer=store)
+
+# Initialize Database and Store CSV Data
+create_pg_table()
+csv_file_path = "data/inventory.csv"  # Replace with actual CSV file
+process_csv_and_store_embeddings(csv_file_path)
+
+# Setup Retriever
+retriever = setup_pgvector()
+
+# Run Query Processing Loop
+while True:
+    user_query = input("Write Query Here: ")
+    if user_query.lower() in ["exit", "quit"]:
+        break
+
+    retrieval_graph.invoke({"query": user_query})
